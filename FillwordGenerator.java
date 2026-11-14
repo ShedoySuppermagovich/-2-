@@ -3,7 +3,7 @@ import java.util.NoSuchElementException;
 import java.util.Random;
 import java.util.Scanner;
 
-// ===== Часть 1. Родионов Ростислав: модель данных, проверка ввода и словарь =====
+// ===== Часть 1. Валента Артём: модель данных, проверка ввода и словарь =====
 
 enum Direction {
     UP(-1, 0), DOWN(1, 0), LEFT(0, -1), RIGHT(0, 1);
@@ -553,7 +553,7 @@ class FillwordSolver {
     }
 }
 
-// ===== Часть 3. Артем Валента: проверка результата, вывод и запуск =====
+// ===== Часть 3. Родионов Ростислав: проверка результата, вывод и запуск =====
 
 class FillwordValidator {
     static boolean isValid(char[][] grid, String[] words, Cell[][] paths) {
