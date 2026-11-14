@@ -1,231 +1,314 @@
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
-import java.util.LinkedHashSet;
-import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Random;
 import java.util.Scanner;
-import java.util.Set;
 
-/**
- * Генератор структуры филворда (Java 8).
- *
- * Все слова словаря размещаются в квадратной сетке size x size ровно по одному разу.
- * Слово читается по соседним клеткам (вверх/вниз/влево/вправо, без диагоналей),
- * может поворачивать, клетки разных слов не пересекаются, пустых клеток не остаётся.
- *
- * Алгоритм: поиск с возвратом (backtracking) + отсечения:
- *   1) слова размещаются от длинных к коротким;
- *   2) после каждого слова свободная область делится на связные куски (flood fill),
- *      и размер каждого куска обязан быть суммой длин каких-то ещё не размещённых слов;
- *   3) ограничение по времени, чтобы программа не «зависала» на неразрешимых данных.
- */
-public class FillwordGenerator {
+// ===== Часть 1. Родионов Ростислав: модель данных и проверка ввода =====
 
-    // ------------------------------------------------------------------ данные
+enum Direction {
+    UP(-1, 0), DOWN(1, 0), LEFT(0, -1), RIGHT(0, 1);
 
-    /** Клетка сетки (хранит координаты, нумерация с 0). */
-    public static final class Cell {
-        public final int row;
-        public final int col;
+    private final int dRow;
+    private final int dCol;
 
-        Cell(int row, int col) {
-            this.row = row;
-            this.col = col;
-        }
-
-        @Override
-        public String toString() {
-            return "(" + (row + 1) + "," + (col + 1) + ")";
-        }
+    // dRow, dCol - смещение соседней клетки по строке и столбцу
+    Direction(int dRow, int dCol) {
+        this.dRow = dRow;
+        this.dCol = dCol;
     }
 
-    private static final int[] DR = {-1, 1, 0, 0};
-    private static final int[] DC = {0, 0, -1, 1};
+    int getDRow() {
+        return dRow;
+    }
+
+    int getDCol() {
+        return dCol;
+    }
+}
+
+class Cell {
+    private final int row;
+    private final int col;
+
+    Cell(int row, int col) {
+        this.row = row;
+        this.col = col;
+    }
+
+    int getRow() {
+        return row;
+    }
+
+    int getCol() {
+        return col;
+    }
+
+    @Override
+    public String toString() {
+        return "(" + (row + 1) + "," + (col + 1) + ")";
+    }
+}
+
+class FillwordException extends Exception {
+    FillwordException(String message) {
+        super(message);
+    }
+}
+
+class InputParser {
+    private static final String WORD_PATTERN = "[А-Яа-яЁё]+";
+
+    static int parseSize(String text) throws FillwordException {
+        String s = text.trim();
+        if (!s.matches("[0-9]+")) {
+            throw new FillwordException("Введите целое положительное число.");
+        }
+        int size = s.length() > 2 ? 0 : Integer.parseInt(s);
+        if (size < 3 || size > 6) {
+            throw new FillwordException("Можно выбрать только 3, 4, 5 или 6.");
+        }
+        return size;
+    }
+
+    static String[] parseWords(String line, int size) throws FillwordException {
+        String trimmed = line.trim();
+        if (trimmed.isEmpty()) {
+            throw new FillwordException("Список слов пуст.");
+        }
+
+        String[] parts = trimmed.split("[\\s,;]+");
+        String[] unique = new String[parts.length];
+        int count = 0;
+        int total = 0;
+
+        for (String part : parts) {
+            if (!part.matches(WORD_PATTERN)) {
+                throw new FillwordException("Слова должны содержать только русские буквы.");
+            }
+            String word = part.toUpperCase();
+            if (contains(unique, count, word)) {
+                System.out.println("Предупреждение: слово «" + part
+                        + "» повторяется, учтено один раз.");
+                continue;
+            }
+            unique[count++] = word;
+            total += word.length();
+        }
+
+        if (total != size * size) {
+            throw new FillwordException("Количество букв должно быть равно "
+                    + size * size + " (сейчас " + total + ").");
+        }
+
+        String[] result = new String[count];
+        System.arraycopy(unique, 0, result, 0, count);
+        return result;
+    }
+
+    private static boolean contains(String[] items, int count, String word) {
+        for (int i = 0; i < count; i++) {
+            if (items[i].equals(word)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// ===== Часть 2. Копасов Савелий: алгоритм размещения слов =====
+
+class FillwordSolver {
     private static final char EMPTY = '\0';
+    private static final long DEFAULT_TIME_LIMIT_MS = 20000;
     private static final long CHECK_EVERY = 4096;
+    private static final long START_BUDGET = 3000;
+    private static final Direction[] DIRECTIONS = Direction.values();
 
     private final int size;
-    private final String[] words;          // слова в исходном порядке (ВЕРХНИЙ РЕГИСТР)
-    private final int[] order;             // порядок размещения: индексы слов, длинные первыми
-    private final boolean[][] reachable;   // reachable[k][s]: s = сумма длин каких-то слов order[k..]
+    private final String[] words;
+    private final int[] order;
+    private final boolean[][] reachable;
     private final long timeLimitMs;
-
+    private final Random random;
     private final char[][] grid;
-    private final List<List<Cell>> paths;  // paths.get(i) — путь слова words[i]
+    private final Cell[][] paths;
 
     private long deadline;
     private long nodes;
+    private long attemptEnd;
+    private boolean cutOff;
     private boolean timedOut;
 
-    public FillwordGenerator(int size, List<String> dictionary, long timeLimitMs) {
+    // size - сторона сетки, words - слова в верхнем регистре,
+    // timeLimitMs - предельное время поиска в миллисекундах,
+    // random - источник случайности (одинаковое зерно даёт одинаковый филворд)
+    FillwordSolver(int size, String[] words, long timeLimitMs, Random random) {
         this.size = size;
-        this.words = dictionary.toArray(new String[0]);
+        this.words = words;
         this.timeLimitMs = timeLimitMs;
+        this.random = random;
         this.grid = new char[size][size];
-        this.paths = new ArrayList<List<Cell>>();
-        for (int i = 0; i < words.length; i++) {
-            paths.add(null);
-        }
+        this.paths = new Cell[words.length][];
+        this.order = orderByLength(words);
+        this.reachable = buildReachable();
+    }
 
-        // порядок: длинные слова первыми (они сильнее всего ограничивают поиск)
-        Integer[] idx = new Integer[words.length];
-        for (int i = 0; i < idx.length; i++) {
-            idx[i] = i;
-        }
-        Arrays.sort(idx, new Comparator<Integer>() {
-            @Override
-            public int compare(Integer a, Integer b) {
-                int byLen = Integer.compare(words[b].length(), words[a].length());
-                return byLen != 0 ? byLen : Integer.compare(a, b);
+    // Случайное расположение при каждом запуске
+    FillwordSolver(int size, String[] words, long timeLimitMs) {
+        this(size, words, timeLimitMs, new Random());
+    }
+
+    // Лимит времени по умолчанию
+    FillwordSolver(int size, String[] words) {
+        this(size, words, DEFAULT_TIME_LIMIT_MS);
+    }
+
+    private int[] orderByLength(String[] words) {
+        int[] order = shuffled(words.length);
+        for (int i = 1; i < order.length; i++) {
+            int current = order[i];
+            int j = i - 1;
+            while (j >= 0 && words[order[j]].length() < words[current].length()) {
+                order[j + 1] = order[j];
+                j--;
             }
-        });
-        this.order = new int[idx.length];
-        for (int i = 0; i < idx.length; i++) {
-            order[i] = idx[i];
+            order[j + 1] = current;
         }
+        return order;
+    }
 
-        // reachable[k] — задача о сумме подмножества для «хвоста» order[k..]
+    private boolean[][] buildReachable() {
         int cells = size * size;
-        this.reachable = new boolean[order.length + 1][cells + 1];
-        reachable[order.length][0] = true;
+        boolean[][] result = new boolean[order.length + 1][cells + 1];
+        result[order.length][0] = true;
         for (int k = order.length - 1; k >= 0; k--) {
             int len = words[order[k]].length();
             for (int s = 0; s <= cells; s++) {
-                reachable[k][s] = reachable[k + 1][s]
-                        || (s >= len && reachable[k + 1][s - len]);
+                result[k][s] = result[k + 1][s] || (s >= len && result[k + 1][s - len]);
             }
         }
+        return result;
     }
 
-    // --------------------------------------------------------------- публичное API
-
-    /** Запускает поиск. true — филворд построен, false — не найден или вышло время. */
-    public boolean generate() {
+    boolean solve() {
         deadline = System.currentTimeMillis() + timeLimitMs;
         nodes = 0;
         timedOut = false;
-        return placeWord(0);
+
+        long budget = START_BUDGET;
+        while (!timedOut) {
+            clear();
+            attemptEnd = nodes + budget;
+            cutOff = false;
+            if (placeWord(0)) {
+                return true;
+            }
+            if (!cutOff) {
+                return false;
+            }
+            budget *= 2;
+        }
+        return false;
     }
 
-    public boolean isTimedOut() {
-        return timedOut;
+    private void clear() {
+        for (char[] row : grid) {
+            Arrays.fill(row, EMPTY);
+        }
+        for (int i = 0; i < paths.length; i++) {
+            paths[i] = null;
+        }
     }
 
-    public long getNodes() {
-        return nodes;
-    }
-
-    public char[][] getGrid() {
-        return grid;
-    }
-
-    public List<List<Cell>> getPaths() {
-        return paths;
-    }
-
-    public String[] getWords() {
-        return words;
-    }
-
-    // ------------------------------------------------------------------ алгоритм
-
-    /** Размещает k-е по порядку слово: перебирает стартовые клетки. */
     private boolean placeWord(int k) {
         if (k == order.length) {
             return true;
         }
         if (!regionsFeasible(k)) {
-            return false; // отсечение: свободные «карманы» нельзя заполнить оставшимися словами
+            return false;
         }
 
         int wordIndex = order[k];
         String word = words[wordIndex];
 
-        for (int r = 0; r < size; r++) {
-            for (int c = 0; c < size; c++) {
-                if (grid[r][c] != EMPTY) {
-                    continue;
-                }
-                List<Cell> path = new ArrayList<Cell>();
-                grid[r][c] = word.charAt(0);
-                path.add(new Cell(r, c));
+        for (int start : shuffled(size * size)) {
+            int r = start / size;
+            int c = start % size;
+            if (grid[r][c] != EMPTY) {
+                continue;
+            }
+            Cell[] path = new Cell[word.length()];
+            path[0] = new Cell(r, c);
+            paths[wordIndex] = path;
+            grid[r][c] = word.charAt(0);
 
-                if (extendPath(k, word, 1, r, c, path)) {
-                    return true;
-                }
-                grid[r][c] = EMPTY; // откат стартовой клетки
-                if (timedOut) {
-                    return false;
-                }
+            if (extendPath(k, word, 1, path)) {
+                return true;
+            }
+            grid[r][c] = EMPTY;
+            if (timedOut || cutOff) {
+                paths[wordIndex] = null;
+                return false;
             }
         }
+        paths[wordIndex] = null;
         return false;
     }
 
-    /** Рекурсивно «рисует» слово по соседним клеткам. */
-    private boolean extendPath(int k, String word, int pos, int row, int col, List<Cell> path) {
+    private boolean extendPath(int k, String word, int pos, Cell[] path) {
         if (++nodes % CHECK_EVERY == 0 && System.currentTimeMillis() > deadline) {
             timedOut = true;
         }
-        if (timedOut) {
+        if (nodes > attemptEnd) {
+            cutOff = true;
+        }
+        if (timedOut || cutOff) {
             return false;
         }
-
-        if (pos == word.length()) {                 // слово целиком уложено
-            int wordIndex = order[k];
-            paths.set(wordIndex, new ArrayList<Cell>(path));
-            if (placeWord(k + 1)) {                 // переходим к следующему слову
-                return true;
-            }
-            paths.set(wordIndex, null);             // откат
-            return false;
+        if (pos == word.length()) {
+            return placeWord(k + 1);
         }
 
-        for (int d = 0; d < 4; d++) {
-            int nr = row + DR[d];
-            int nc = col + DC[d];
-            if (nr < 0 || nr >= size || nc < 0 || nc >= size || grid[nr][nc] != EMPTY) {
+        Cell last = path[pos - 1];
+        for (int index : shuffled(DIRECTIONS.length)) {
+            Direction d = DIRECTIONS[index];
+            int nr = last.getRow() + d.getDRow();
+            int nc = last.getCol() + d.getDCol();
+            if (!isFree(nr, nc)) {
                 continue;
             }
             grid[nr][nc] = word.charAt(pos);
-            path.add(new Cell(nr, nc));
+            path[pos] = new Cell(nr, nc);
 
-            if (extendPath(k, word, pos + 1, nr, nc, path)) {
+            if (extendPath(k, word, pos + 1, path)) {
                 return true;
             }
-            path.remove(path.size() - 1);           // откат клетки
             grid[nr][nc] = EMPTY;
         }
         return false;
     }
 
-    /**
-     * Проверка «карманов»: каждая связная область свободных клеток должна иметь размер,
-     * равный сумме длин какого-то подмножества оставшихся слов. Иначе ветку можно не искать.
-     */
     private boolean regionsFeasible(int k) {
         boolean[][] seen = new boolean[size][size];
         int[] stack = new int[size * size];
 
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
-                if (grid[r][c] != EMPTY || seen[r][c]) {
+                if (!isFree(r, c) || seen[r][c]) {
                     continue;
                 }
                 int top = 0;
                 int count = 0;
                 stack[top++] = r * size + c;
                 seen[r][c] = true;
+
                 while (top > 0) {
                     int cur = stack[--top];
                     count++;
-                    int cr = cur / size;
-                    int cc = cur % size;
-                    for (int d = 0; d < 4; d++) {
-                        int nr = cr + DR[d];
-                        int nc = cc + DC[d];
-                        if (nr >= 0 && nr < size && nc >= 0 && nc < size
-                                && grid[nr][nc] == EMPTY && !seen[nr][nc]) {
+                    for (Direction d : DIRECTIONS) {
+                        int nr = cur / size + d.getDRow();
+                        int nc = cur % size + d.getDCol();
+                        if (isFree(nr, nc) && !seen[nr][nc]) {
                             seen[nr][nc] = true;
                             stack[top++] = nr * size + nc;
                         }
@@ -239,143 +322,181 @@ public class FillwordGenerator {
         return true;
     }
 
-    // ------------------------------------------------------------ самопроверка
+    private int[] shuffled(int n) {
+        int[] result = new int[n];
+        for (int i = 0; i < n; i++) {
+            result[i] = i;
+        }
+        for (int i = n - 1; i > 0; i--) {
+            int j = random.nextInt(i + 1);
+            int tmp = result[i];
+            result[i] = result[j];
+            result[j] = tmp;
+        }
+        return result;
+    }
 
-    /** Независимая проверка результата по всем правилам задания. */
-    public boolean validate() {
+    private boolean isFree(int r, int c) {
+        return r >= 0 && r < size && c >= 0 && c < size && grid[r][c] == EMPTY;
+    }
+
+    char[][] getGrid() {
+        return grid;
+    }
+
+    Cell[][] getPaths() {
+        return paths;
+    }
+
+    long getNodes() {
+        return nodes;
+    }
+
+    boolean isTimedOut() {
+        return timedOut;
+    }
+}
+
+// ===== Часть 3. Артем Валента: проверка результата, вывод и запуск =====
+
+class FillwordValidator {
+    static boolean isValid(char[][] grid, String[] words, Cell[][] paths) {
+        int size = grid.length;
         boolean[][] used = new boolean[size][size];
+
         for (int i = 0; i < words.length; i++) {
-            List<Cell> p = paths.get(i);
-            if (p == null || p.size() != words[i].length()) {
+            Cell[] path = paths[i];
+            if (path == null || path.length != words[i].length()) {
                 return false;
             }
-            for (int j = 0; j < p.size(); j++) {
-                Cell cell = p.get(j);
-                if (used[cell.row][cell.col] || grid[cell.row][cell.col] != words[i].charAt(j)) {
-                    return false;           // пересечение или неверная буква
+            for (int j = 0; j < path.length; j++) {
+                if (path[j] == null) {
+                    return false;
                 }
-                used[cell.row][cell.col] = true;
-                if (j > 0) {
-                    Cell prev = p.get(j - 1);
-                    if (Math.abs(prev.row - cell.row) + Math.abs(prev.col - cell.col) != 1) {
-                        return false;       // не соседние по стороне клетки
-                    }
+                int r = path[j].getRow();
+                int c = path[j].getCol();
+                if (used[r][c] || grid[r][c] != words[i].charAt(j)) {
+                    return false;
+                }
+                used[r][c] = true;
+                if (j > 0 && Math.abs(path[j - 1].getRow() - r)
+                        + Math.abs(path[j - 1].getCol() - c) != 1) {
+                    return false;
                 }
             }
         }
+
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
                 if (!used[r][c]) {
-                    return false;           // осталась пустая клетка
+                    return false;
                 }
             }
         }
         return true;
     }
+}
 
-    // ------------------------------------------------------------------ main
-
-    public static void main(String[] args) {
-        Scanner scanner = new Scanner(System.in);
-
-        System.out.println("Генератор филворда");
-        System.out.print("Введите размер сетки (3, 4, 5 или 6): ");
-        String input = scanner.nextLine().trim();
-
-        if (!input.matches("[0-9]+")) {
-            System.out.println("Ошибка! Введите целое положительное число.");
-            return;
-        }
-        int size = Integer.parseInt(input);
-        if (size < 3 || size > 6) {
-            System.out.println("Ошибка! Можно выбрать только 3, 4, 5 или 6.");
-            return;
-        }
-
-        System.out.println("Введите слова через пробел:");
-        String line = scanner.nextLine().trim();
-        if (line.isEmpty()) {
-            System.out.println("Ошибка! Список слов пуст.");
-            return;
-        }
-
-        // LinkedHashSet убирает дубликаты, сохраняя порядок ввода
-        Set<String> unique = new LinkedHashSet<String>();
-        int totalLength = 0;
-        for (String w : line.split("[\\s,;]+")) {
-            if (!w.matches("[А-Яа-яЁё]+")) {
-                System.out.println("Ошибка! Слова должны содержать только русские буквы.");
-                return;
-            }
-            if (unique.add(w.toUpperCase())) {
-                totalLength += w.length();
-            } else {
-                System.out.println("Предупреждение: слово «" + w + "» повторяется, учтено один раз.");
-            }
-        }
-
-        if (totalLength != size * size) {
-            System.out.println("Ошибка! Количество букв должно быть равно "
-                    + (size * size) + " (сейчас " + totalLength + ").");
-            return;
-        }
-
-        FillwordGenerator gen = new FillwordGenerator(size, new ArrayList<String>(unique), 20000);
-        long start = System.currentTimeMillis();
-        boolean ok = gen.generate();
-        long time = System.currentTimeMillis() - start;
-
-        if (!ok) {
-            System.out.println(gen.isTimedOut()
-                    ? "Время поиска истекло, филворд не найден."
-                    : "Филворд для этих слов построить невозможно.");
-            return;
-        }
-        print(gen, time);
-        scanner.close();
-    }
-
-    private static void print(FillwordGenerator gen, long time) {
-        char[][] grid = gen.getGrid();
-        String[] words = gen.getWords();
-        int size = grid.length;
-
-        System.out.println("\nФилворд создан! (" + time + " мс, узлов поиска: " + gen.getNodes()
-                + ", проверка правил: " + (gen.validate() ? "пройдена" : "НЕ пройдена") + ")\n");
-
+class FillwordPrinter {
+    static void print(char[][] grid) {
         System.out.println("Сетка:");
         for (char[] row : grid) {
             StringBuilder sb = new StringBuilder();
             for (char ch : row) {
                 sb.append(ch).append("  ");
             }
-            System.out.println(sb.toString());
+            System.out.println(sb);
         }
+    }
 
-        // карта принадлежности: в каждой клетке — номер слова
+    static void print(Cell[][] paths, int size) {
         int[][] owner = new int[size][size];
-        for (int i = 0; i < words.length; i++) {
-            for (Cell cell : gen.getPaths().get(i)) {
-                owner[cell.row][cell.col] = i + 1;
+        for (int i = 0; i < paths.length; i++) {
+            for (Cell cell : paths[i]) {
+                owner[cell.getRow()][cell.getCol()] = i + 1;
             }
         }
         System.out.println("\nНомера слов в клетках:");
         for (int[] row : owner) {
             StringBuilder sb = new StringBuilder();
-            for (int v : row) {
-                sb.append(String.format("%-3d", v));
+            for (int value : row) {
+                sb.append(String.format("%-3d", value));
             }
-            System.out.println(sb.toString());
+            System.out.println(sb);
         }
+    }
 
+    static void print(String[] words, Cell[][] paths) {
         System.out.println("\nКоординаты слов (строка,столбец):");
         for (int i = 0; i < words.length; i++) {
             StringBuilder sb = new StringBuilder();
             sb.append(i + 1).append(". ").append(words[i]).append(": ");
-            for (Cell cell : gen.getPaths().get(i)) {
+            for (Cell cell : paths[i]) {
                 sb.append(cell).append(' ');
             }
-            System.out.println(sb.toString());
+            System.out.println(sb);
         }
+    }
+}
+
+public class FillwordGenerator {
+
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+        try {
+            int size;
+            String[] words;
+
+            if (args.length >= 2) {
+                size = InputParser.parseSize(args[0]);
+                words = InputParser.parseWords(join(args, 1), size);
+            } else {
+                System.out.println("Генератор филворда");
+                System.out.print("Введите размер сетки (3, 4, 5 или 6): ");
+                size = InputParser.parseSize(scanner.nextLine());
+                System.out.println("Введите слова через пробел:");
+                words = InputParser.parseWords(scanner.nextLine(), size);
+            }
+            solveAndShow(size, words);
+
+        } catch (FillwordException e) {
+            System.out.println("Ошибка! " + e.getMessage());
+        } catch (NoSuchElementException e) {
+            System.out.println("Ошибка! Ввод прерван.");
+        } finally {
+            scanner.close();
+        }
+    }
+
+    private static void solveAndShow(int size, String[] words) {
+        FillwordSolver solver = new FillwordSolver(size, words);
+
+        long start = System.currentTimeMillis();
+        boolean found = solver.solve();
+        long time = System.currentTimeMillis() - start;
+
+        if (!found) {
+            System.out.println(solver.isTimedOut()
+                    ? "Время поиска истекло, филворд не найден."
+                    : "Филворд для этих слов построить невозможно.");
+            return;
+        }
+
+        boolean valid = FillwordValidator.isValid(solver.getGrid(), words, solver.getPaths());
+        System.out.println("\nФилворд создан! (" + time + " мс, узлов поиска: "
+                + solver.getNodes() + ", проверка правил: "
+                + (valid ? "пройдена" : "НЕ пройдена") + ")\n");
+
+        FillwordPrinter.print(solver.getGrid());
+        FillwordPrinter.print(solver.getPaths(), size);
+        FillwordPrinter.print(words, solver.getPaths());
+    }
+
+    private static String join(String[] args, int from) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = from; i < args.length; i++) {
+            sb.append(args[i]).append(' ');
+        }
+        return sb.toString();
     }
 }
