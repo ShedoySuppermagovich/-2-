@@ -52,9 +52,9 @@ Fillword Generator — консольное приложение на Java 8, к
 
 | Часть | Исполнитель | Содержимое |
 |---|---|---|
-| 1. Модель данных и проверка ввода | Родионов Ростислав | `Direction`, `Cell`, `FillwordException`, `InputParser` |
+| 1. Модель данных и проверка ввода | Валента Артём | `Direction`, `Cell`, `FillwordException`, `InputParser` |
 | 2. Алгоритм размещения слов | Копасов Савелий | `FillwordSolver` |
-| 3. Проверка результата, вывод и запуск | Артем Валента | `FillwordValidator`, `FillwordPrinter`, `FillwordGenerator` (`main`) |
+| 3. Проверка результата, вывод и запуск | Родионов Ростислав | `FillwordValidator`, `FillwordPrinter`, `FillwordGenerator` (`main`) |
 
 ### Основные классы и методы
 
