@@ -174,7 +174,7 @@ If an attempt ended without being cut off, all variants were checked and there i
 
 ## Division of Work
 
-### Rostislav Rodionov — Part 1
+### Artem Valenta — Part 1
 
 - Direction enumeration `Direction` and the cell class `Cell`.
 - Exception class `FillwordException`.
@@ -187,7 +187,7 @@ If an attempt ended without being cut off, all variants were checked and there i
 - Random order of starting cells and directions, random restarts.
 - Pruning by the sizes of free areas (`regionsFeasible()`).
 
-### Artem Valenta — Part 3
+### Rostislav Rodionov — Part 3
 
 - Result check in `FillwordValidator`.
 - Output of the grid, word-number map and coordinates in `FillwordPrinter`.
